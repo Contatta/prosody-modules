@@ -26,6 +26,7 @@ local function is_stanza(x)
 end
 
 local tostring = tostring;
+local t_insert = table.insert;
 local time_now = os.time;
 local m_min = math.min;
 local timestamp, timestamp_parse = require "util.datetime".datetime, require "util.datetime".parse;
@@ -44,6 +45,11 @@ elseif not archive.find then
 	module:log("error", "mod_%s does not support archiving, switch to mod_storage_sql2", archive._provided_by);
 	return
 end
+
+-- archive storage capabilities
+local caps = archive.caps or {}
+local caps_body_full_text_search = caps.body_full_text_search or false
+local var_body_full_text_search  = "http://prosody.im/protocol/mam#body-full-text-search"
 
 -- Handle prefs.
 module:hook("iq/self/"..xmlns_mam..":prefs", function(event)
@@ -64,12 +70,19 @@ module:hook("iq/self/"..xmlns_mam..":prefs", function(event)
 	end
 end);
 
-local query_form = dataform {
-	{ name = "FORM_TYPE"; type = "hidden"; value = xmlns_mam; };
-	{ name = "with"; type = "jid-single"; };
-	{ name = "start"; type = "text-single" };
-	{ name = "end"; type = "text-single"; };
-};
+local query_form
+do
+	local form = {
+		{ name = "FORM_TYPE"; type = "hidden"; value = xmlns_mam; };
+		{ name = "with"; type = "jid-single"; };
+		{ name = "start"; type = "text-single" };
+		{ name = "end"; type = "text-single"; };
+	}
+	if caps_body_full_text_search then
+		t_insert(form, { name = var_body_full_text_search; type = "text-single" })
+	end
+	query_form = dataform(form)
+end
 
 -- Serve form
 module:hook("iq-get/self/"..xmlns_mam..":query", function(event)
@@ -84,7 +97,7 @@ module:hook("iq-set/self/"..xmlns_mam..":query", function(event)
 	local qid = query.attr.queryid;
 
 	-- Search query parameters
-	local qwith, qstart, qend;
+	local qry = { total = true }
 	local form = query:get_child("x", "jabber:x:data");
 	if form then
 		local err;
@@ -92,39 +105,36 @@ module:hook("iq-set/self/"..xmlns_mam..":query", function(event)
 		if err then
 			return origin.send(st.error_reply(stanza, "modify", "bad-request", select(2, next(err))))
 		end
-		qwith, qstart, qend = form["with"], form["start"], form["end"];
-		qwith = qwith and jid_bare(qwith); -- dataforms does jidprep
+		qry.with, qry.start, qry["end"] = form["with"], form["start"], form["end"];
+		qry.with = qry.with and jid_bare(qry.with); -- dataforms does jidprep
+		
+		if caps_body_full_text_search and form[var_body_full_text_search] ~= nil then
+			qry.body_full_text_search = form[var_body_full_text_search]
+		end
 	end
 
-	if qstart or qend then -- Validate timestamps
-		local vstart, vend = (qstart and timestamp_parse(qstart)), (qend and timestamp_parse(qend))
-		if (qstart and not vstart) or (qend and not vend) then
+	if qry.start or qry["end"] then -- Validate timestamps
+		local vstart, vend = (qry.start and timestamp_parse(qry.start)), (qry["end"] and timestamp_parse(qry["end"]))
+		if (qry.start and not vstart) or (qry["end"] and not vend) then
 			origin.send(st.error_reply(stanza, "modify", "bad-request", "Invalid timestamp"))
 			return true
 		end
-		qstart, qend = vstart, vend;
+		qry.start, qry["end"] = vstart, vend;
 	end
 
 	module:log("debug", "Archive query, id %s with %s from %s until %s)",
-		tostring(qid), qwith or "anyone", qstart or "the dawn of time", qend or "now");
+		tostring(qid), qry.with or "anyone", qry.start or "the dawn of time", qry["end"] or "now");
 
 	-- RSM stuff
 	local qset = rsm.get(query);
-	local qmax = m_min(qset and qset.max or default_max_items, max_max_items);
-	local reverse = qset and qset.before or false;
-	local before, after = qset and qset.before, qset and qset.after;
-	if type(before) ~= "string" then before = nil; end
+	qry.limit = m_min(qset and qset.max or default_max_items, max_max_items);
+	qry.reverse = qset and qset.before or false;
+	qry.before, qry.after = qset and qset.before, qset and qset.after;
+	if type(qry.before) ~= "string" then qry.before = nil; end
 
 
 	-- Load all the data!
-	local data, err = archive:find(origin.username, {
-		start = qstart; ["end"] = qend; -- Time range
-		with = qwith;
-		limit = qmax;
-		before = before; after = after;
-		reverse = reverse;
-		total = true;
-	});
+	local data, err = archive:find(origin.username, qry);
 
 	if not data then
 		return origin.send(st.error_reply(stanza, "cancel", "internal-server-error", err));
@@ -156,7 +166,7 @@ module:hook("iq-set/self/"..xmlns_mam..":query", function(event)
 	-- That's all folks!
 	module:log("debug", "Archive query %s completed", tostring(qid));
 
-	if reverse then first, last = last, first; end
+	if qry.reverse then first, last = last, first; end
 	return origin.send(st.message(msg_reply_attr)
 		:tag("fin", { xmlns = xmlns_mam, queryid = qid })
 			:add_child(rsm.generate {
