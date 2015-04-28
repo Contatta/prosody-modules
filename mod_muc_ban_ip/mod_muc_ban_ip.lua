@@ -22,7 +22,7 @@ local function ban_ip(session, from)
 	module:log("debug", "Banned IP address %s from %s", ip, from);
 end
 
-function check_for_incoming_ban(event)
+local function check_for_incoming_ban(event)
 	local stanza = event.stanza;
 	local to_session = full_sessions[stanza.attr.to];
 	if to_session then
@@ -42,7 +42,7 @@ function check_for_incoming_ban(event)
 	end
 end
 
-function check_for_ban(event)
+local function check_for_ban(event)
 	local ip = event.origin.ip;
 	local to = jid_bare(event.stanza.attr.to);
 	if ip_bans[ip] and ip_bans[ip][to] then
@@ -55,6 +55,6 @@ function check_for_ban(event)
 end
 
 function module.add_host(module)
-	module:hook("presence/full", check_for_incoming_ban);
-	module:hook("pre-presence/full", check_for_ban);
+	module:hook("presence/full", check_for_incoming_ban, 100);
+	module:hook("pre-presence/full", check_for_ban, 100);
 end

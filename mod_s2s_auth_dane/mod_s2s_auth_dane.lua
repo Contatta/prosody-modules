@@ -68,15 +68,19 @@ local function dane_lookup(host_session, cb)
 	if host_session.dane ~= nil then return end -- Has already done a lookup
 
 	if host_session.direction == "incoming" then
+		if not host_session.from_host then
+			module:log("debug", "Session doesn't have a 'from' host set");
+			return;
+		end
 		-- We don't know what hostname or port to use for Incoming connections
 		-- so we do a SRV lookup and then request TLSA records for each SRV
 		-- Most servers will probably use the same certificate on outgoing
 		-- and incoming connections, so this should work well
 		local name = host_session.from_host and idna_to_ascii(host_session.from_host);
 		if not name then
-			module:log("error", "Could not convert '%s' to ASCII for DNS lookup", tostring(host_session.from_host));
-				return;
-			end
+			module:log("warn", "Could not convert '%s' to ASCII for DNS lookup", tostring(host_session.from_host));
+			return;
+		end
 		host_session.dane = dns_lookup(function (answer, err)
 			host_session.dane = false; -- Mark that we already did the lookup
 
@@ -111,8 +115,8 @@ local function dane_lookup(host_session, cb)
 					if dane_answer.bogus then
 						dane.bogus = dane_answer.bogus;
 					elseif dane_answer.secure then
-						for _, record in ipairs(dane_answer) do
-							t_insert(dane, record);
+						for _, dane_record in ipairs(dane_answer) do
+							t_insert(dane, dane_record);
 						end
 					end
 					if n == 0 then
@@ -261,8 +265,8 @@ module:hook("s2s-check-certificate", function(event)
 				elseif use == 0 or use == 2 then
 					supported_found = true;
 					local chain = session.conn:socket():getpeerchain();
-					for i = 1, #chain do
-						local cacert = chain[i];
+					for c = 1, #chain do
+						local cacert = chain[c];
 						local is_match = one_dane_check(tlsa, cacert);
 						if is_match ~= nil then
 							supported_found = true;
